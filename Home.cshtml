@@ -1,0 +1,310 @@
+﻿@using System.Data.SqlClient;
+@using System.Security.Cryptography;
+@using System.Text;
+
+@functions {
+
+
+
+    public static byte[] GetHash(string inputString)
+    {
+        HashAlgorithm algorithm = SHA256.Create();
+        return algorithm.ComputeHash(Encoding.UTF8.GetBytes(inputString));
+    }
+
+    public static string GetHashString(string inputString)
+    {
+        StringBuilder sb = new StringBuilder();
+        foreach (byte b in GetHash(inputString))
+            sb.Append(b.ToString("X2"));
+
+        return sb.ToString();
+    }
+
+    public class Comment
+    {
+        public DateTime created { get; set; }
+        public string creatorName { get; set; }
+        public string textContent { get; set; }
+        public int commentid { get; set; }
+        public bool revision { get; set; }
+
+        public Comment(DateTime created, string creatorName, string textContent, int commentid, bool revision)
+        {
+            this.created = created;
+            this.creatorName = creatorName;
+            this.textContent = textContent;
+            this.commentid = commentid;
+            this.revision = revision;
+        }
+    }
+
+    List<Comment> commentsList = new List<Comment>();
+    string connstring = System.Configuration.ConfigurationManager.ConnectionStrings["connString"].ConnectionString;
+    string sql;
+    SqlConnection conn;
+    SqlCommand cmd;
+    bool cannotlogin = false;
+}
+
+@if (IsPost)
+{
+
+    //Check if comment updated
+    if(!Request["modifycommentid"].IsEmpty())
+    {
+        string commentid = Request["modifycommentid"].ToString();
+        string commenttext = Request["modifycommenttext"].ToString();
+
+        //Submit new comment revision to database
+
+        conn = new SqlConnection(connstring);
+        conn.Open();
+
+        sql = "insert into [revisions] (commentid,date,textcontent) values (@commentid,GETDATE(),@textcontent)";
+        cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@commentid", Int32.Parse(commentid));
+        cmd.Parameters.AddWithValue("@textcontent", commenttext);
+        cmd.ExecuteNonQuery();
+
+        conn.Close();
+
+    }
+    //Check if logging out
+    else if(!Request["logoutbutton"].IsEmpty())
+    {
+        FormsAuthentication.SignOut();
+        Request.Cookies.Clear();
+    }
+
+    //If new comment added
+    else if (!Request["commentsubmit"].IsEmpty())
+    {
+        string comment = Request["commenttext"].ToString();
+
+        //Submit to database
+
+        conn = new SqlConnection(connstring);
+        conn.Open();
+
+        string currentuser = @FormsAuthentication.Decrypt(Request.Cookies[0].Value).Name;
+
+        //First, get the ID of the user
+        sql = "select id from users where users.username = @username";
+        cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@username",currentuser);
+        int userid = (int)cmd.ExecuteScalar();
+
+        sql = "insert into [comments] (creator) output INSERTED.ID values (@name)";
+        cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@name", userid);
+        int newid = (int)cmd.ExecuteScalar();
+
+        sql = "insert into [revisions] (commentid,date,textcontent) values (@commentid,GETDATE(),@textcontent)";
+        cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@commentid", newid);
+        cmd.Parameters.AddWithValue("@textcontent", comment);
+        cmd.ExecuteNonQuery();
+
+        conn.Close();
+    }
+    //If logging in
+    else
+    {
+        string username = Request["username"].ToString();
+        string password = Request["password"].ToString();
+
+        if (username == "" || password == "")
+        {
+            //Nothing entered
+            cannotlogin = true;
+        }
+        else
+        {
+            //Check if matches existing record. If new username, create a new user in DB
+            conn = new SqlConnection(connstring);
+            conn.Open();
+
+            sql = "select count(*) from users where username = @user";
+            cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@user", username);
+            int results = (int)cmd.ExecuteScalar();
+
+            if (results != 0)
+            {
+                //Username has been found, now check if password correct
+                sql = "select count(*) from users where username = @user and password = @pass";
+                cmd = new SqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@user", username);
+                cmd.Parameters.AddWithValue("@pass", GetHashString(password));
+                results = (int)cmd.ExecuteScalar();
+                if(results != 0)
+                {
+                    //Correct login found
+                    FormsAuthentication.SetAuthCookie(username, true);
+
+                }
+                else
+                {
+                    //Invalid password
+                    cannotlogin = true;
+                }
+            }
+            else
+            {
+                sql = "insert into users (username,password) values(@user,@pass)";
+                cmd = new SqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@user", username);
+
+                cmd.Parameters.AddWithValue("@pass", GetHashString(password));
+                cmd.ExecuteNonQuery();
+                FormsAuthentication.SetAuthCookie(username, true);
+            }
+            conn.Close();
+        }
+    }
+
+
+}
+
+@{
+    //Retrieve all comments
+    conn = new SqlConnection(connstring);
+    conn.Open();
+
+    sql = "select * from revisions inner join comments on revisions.commentid = comments.id inner join users on comments.creator = users.id order by commentid asc,date desc";
+    cmd = new SqlCommand(sql, conn);
+    string lastcommentid = "";
+    using (SqlDataReader rs = cmd.ExecuteReader())
+    {
+        while (rs.Read())
+        {
+            bool isoldrevision = false;
+            if (rs["commentid"].ToString() == lastcommentid)
+            {
+                isoldrevision = true;
+            }
+            Comment c = new Comment((DateTime)rs["date"], rs["username"].ToString(), rs["textcontent"].ToString(), (int)rs["commentid"],isoldrevision);
+            commentsList.Add(c);
+            lastcommentid = rs["commentid"].ToString();
+        }
+    }
+    conn.Close();
+}
+
+
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="//code.jquery.com/jquery-1.11.1.min.js"></script>
+    <script src="~/main.js"></script>
+    <link href="//netdna.bootstrapcdn.com/bootstrap/3.2.0/css/bootstrap.min.css" rel="stylesheet" id="bootstrap-css">
+    <script src="//netdna.bootstrapcdn.com/bootstrap/3.2.0/js/bootstrap.min.js"></script>
+    <link type="text/css" rel="stylesheet" href="styles.css" />
+    <title>ParcelHub Technical Test - Tommy Foster</title>
+</head>
+<body>
+    <div class="container" id="maindiv">
+        <!--Login textboxes-->
+        <div class="row">
+            @if (Request.Cookies.Count == 0)
+            {
+                <form id="loginform" name="loginform" method="post">
+                    <span>Username</span>
+                    <input type="text" id="username" name="username" />
+                    <span>Password</span>
+                    <input type="password" id="password" name="password" />
+                    <input type="submit" name="login" id="login" value="Login" />
+                </form>
+            }
+            else
+            {
+                <form id="logoutform" name="logoutform" method="post">
+                    <span style="margin:15px;">Logged in as @FormsAuthentication.Decrypt(Request.Cookies[0].Value).Name</span>
+                    <input type="submit" name="logoutbutton" id="logoutbutton" value="Logout" />
+                </form>
+            }
+
+        </div>
+        <!--Header-->
+        <div class="row">
+            <div class="col-xs">
+                <h1 style="margin-bottom:5%;margin-top:5%;">Comments Board</h1>
+            </div>
+        </div>
+        <!--For each comment that exists within database, add a row. Does not display anything from 'comments' table, rather the
+    most recent entry in the 'revisions' table. Can expand to see previous revisions (if any)-->
+        <!--Can modify an existing comment of your own. Adds a new entry to 'revisions' table.-->
+        <form method="post">
+            @foreach (Comment c in commentsList)
+            {
+
+                <div class="row" style="height:30px;margin-bottom:10px;@if (c.revision) {<text>background-color:gray</text> } ">
+                    <div class="col-xs-2">
+
+                        @c.creatorName
+                    </div>
+                    <div class="col-xs-8" style="padding-left:0px;font-weight:bold;">
+                        @if (Request.Cookies.Count > 0 && c.revision == false)
+                        {
+                            if (c.creatorName == FormsAuthentication.Decrypt(Request.Cookies[0].Value).Name)
+                            {
+                                <input type="text" style="width:100%;" name="commentnew" id="commentnew-@c.commentid" value="@c.textContent" />
+                            }
+                            else
+                            {
+                                <span style="width:100%;">@c.textContent </span>
+                            }
+                        }
+
+                        else
+                        {
+                            @c.textContent
+                        }
+                    </div>
+                    @if (Request.Cookies.Count > 0 && c.revision ==false)
+                    {
+                        if (c.creatorName == FormsAuthentication.Decrypt(Request.Cookies[0].Value).Name)
+                        {
+                            <div class="col-xs-2" style="padding-left:0px;">
+                                <center>
+                                    <input type="submit" class="modifycomment "name="modifycomment" id="comment-@c.commentid" value="Update" />
+                                </center>
+
+                            </div>
+                        }
+                    }
+
+                </div>
+
+
+            }
+            <input type="hidden" name="modifycommentid" id="modifycommentid" />
+            <input type="hidden" name="modifycommenttext" id="modifycommenttext" />
+        </form>
+        <!--Textarea and button to post new comment. Inserts a new row into both tables.-->
+        @if (Request.Cookies.Count > 0)
+        {
+            <div class="row" style="padding-top:5%;">
+                <form id="mainform" name="mainform" method="post">
+                    <div class="col-xs-2">
+                        <center>
+                            <input type="submit" value="Submit" name="commentsubmit" id="submitbutton">
+                        </center>
+                    </div>
+                    <div class="col-xs-10" style="padding-left:0px;">
+                        <input type="text" id="commenttext" name="commenttext" />
+                    </div>
+
+                </form>
+            </div>
+        }
+
+    </div>
+    @if (cannotlogin)
+    {
+        <script>alert("Error! Could not login!")</script>
+    }
+</body>
+
+</html>
